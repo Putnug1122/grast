@@ -2,7 +2,10 @@ use anyhow::Result;
 use openai::embeddings::{self, Embedding};
 use qdrant_client::{
     client::{Payload, QdrantClient},
-    qdrant::PointStruct,
+    qdrant::{
+        vectors_config::Config, with_payload_selector::SelectorOptions, CreateCollection, Distance,
+        PointStruct, ScoredPoint, SearchPoints, VectorParams, VectorsConfig, WithPayloadSelector,
+    },
 };
 use serde_json::json;
 
@@ -18,6 +21,28 @@ pub struct VectorDB {
 impl VectorDB {
     pub fn new(client: QdrantClient) -> Self {
         Self { client, id: 0 }
+    }
+
+    pub async fn reset_collection(&self) -> Result<()> {
+        self.client.delete_collection(COLLECTION).await?;
+
+        self.client
+            .create_collection(&CreateCollection {
+                collection_name: COLLECTION.to_string(),
+                vectors_config: Some(VectorsConfig {
+                    config: Some(Config::Params(VectorParams {
+                        size: 1536,
+                        distance: Distance::Cosine.into(),
+                        hnsw_config: None,
+                        quantization_config: None,
+                        on_disk: None,
+                    })),
+                }),
+                ..Default::default()
+            })
+            .await?;
+
+        Ok(())
     }
 
     pub async fn upsert_embedding(&mut self, embedding: Embedding, file: &File) -> Result<()> {
@@ -38,5 +63,25 @@ impl VectorDB {
         self.id += 1;
 
         Ok(())
+    }
+
+    pub async fn search(&self, embedding: Embedding) -> Result<ScoredPoint> {
+        let vec: Vec<f32> = embedding.vec.iter().map(|&x| x as f32).collect();
+
+        let payload_selector = WithPayloadSelector {
+            selector_options: Some(SelectorOptions::Enable(true)),
+        };
+
+        let search_points = SearchPoints {
+            collection_name: COLLECTION.to_string(),
+            vector: vec,
+            limit: 1,
+            with_payload: Some(payload_selector),
+            ..Default::default()
+        };
+
+        let search_result = self.client.search_points(&search_points).await?;
+        let result = search_result.result[0].clone();
+        Ok(result)
     }
 }
